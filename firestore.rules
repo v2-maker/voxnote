@@ -1,0 +1,59 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      match /notes/{noteId} {
+        allow read, list: if isOwner(userId);
+
+        allow create: if isOwner(userId)
+                      && request.resource.data.userId == userId
+                      && request.resource.data.status == 'uploading';
+
+        // Clients may only touch user-facing metadata. System-managed fields
+        // (status, transcript, keywords, audioStoragePath, createdAt) are
+        // written exclusively by the Cloud Function via the Admin SDK.
+        // This stops a compromised client from faking transcripts or
+        // corrupting note records. shareTokens tracks the note's public
+        // share links (Phase 3) and is owner-managed metadata.
+        allow update: if isOwner(userId)
+                      && request.resource.data.userId == resource.data.userId
+                      && request.resource.data.audioStoragePath == resource.data.audioStoragePath
+                      && request.resource.data.createdAt == resource.data.createdAt
+                      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'updatedAt', 'shareTokens']);
+
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    // Phase 3: public share links. Each share is a top-level doc whose ID is
+    // a 256-bit random token — unguessable, and listing is forbidden so
+    // tokens can't be enumerated. The doc carries a denormalized copy of the
+    // note (title/transcript/summary/actionItems) so public readers never
+    // touch the owner's private note path.
+    match /shares/{token} {
+      // Anyone with the link can read it; revoked links are dead.
+      allow get: if resource.data.revoked != true;
+      allow list: if false;
+      // Only the note owner can publish a share, and the stored token must
+      // match the document ID.
+      allow create: if isOwner(request.resource.data.userId)
+                    && request.resource.data.token == token
+                    && request.resource.data.noteId is string;
+      // Owner may only flip the revoked flag.
+      allow update: if isOwner(resource.data.userId)
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revoked']);
+      allow delete: if isOwner(resource.data.userId);
+    }
+  }
+}
